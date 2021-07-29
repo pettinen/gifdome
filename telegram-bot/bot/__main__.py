@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import psycopg2
 import toml
+from PIL import Image
 from redis import Redis
 from telegram import Bot
 from telegram.constants import PARSEMODE_MARKDOWN_V2
@@ -17,6 +19,8 @@ from telegram.utils.request import Request
 
 
 apos = "\u2019"
+emoji_a = "\U0001F170\uFE0F"
+emoji_b = "\U0001F171\uFE0F"
 
 project_path = Path(os.getenv("STICKERDOME_DIR", Path(sys.path[0]).parent))
 
@@ -30,6 +34,24 @@ class State(Enum):
     TAKING_SUBMISSIONS = b"taking-submissions"
     VOTING = b"voting"
     ENDED = b"ended"
+
+
+def _enum_values(enum):
+    return {x.value for x in enum}
+
+
+def _find_enum_by_value(enum, value):
+    for x in enum:
+        if x.value == value:
+            return x
+    return None
+
+
+def _int_from_bytes(b):
+    try:
+        return int(b)
+    except (TypeError, ValueError):
+        return None
 
 
 bot = Bot(
@@ -50,12 +72,19 @@ with db:
 
 
 redis = Redis(unix_socket_path=config["redis_socket"], db=config["redis_db"])
-if not redis.get("state") or not redis.get("group_id"):
-    redis.set("state", State.NOT_STARTED.value)
 
-chat_id = redis.get("group_id")
-if False and chat_id:
-    chat_id = chat_id.decode()
+
+def reset():
+    with db:
+        with db.cursor() as cur:
+            cur.execute("""DELETE FROM "submissions"; DELETE FROM "stickers"; DELETE FROM "users";""")
+    redis.set("state", State.NOT_STARTED.value)
+    for key in ["group_id", "current_stickers_message", "current_poll"]:
+        redis.delete(key)
+
+
+chat_id = _int_from_bytes(redis.get("group_id"))
+if False and chat_id is not None:
     notice = bot.send_message(chat_id=chat_id, parse_mode=PARSEMODE_MARKDOWN_V2,
         text=f"""\
 \u2022 *Removed* submission limit for stickers already posted\\.
@@ -63,10 +92,14 @@ if False and chat_id:
 """)
     bot.pin_chat_message(chat_id=chat_id, message_id=notice.message_id, disable_notification=True)
 
+
 def exit_handler(signalnum, frame):
     db.close()
     redis.close()
+    if (group_id := _int_from_bytes(redis.get("group_id"))) is not None:
+        bot.send_message(chat_id=group_id, text="Stickerdome going down for maintenance and shit...")
     sys.exit(0)
+
 
 signal.signal(signal.SIGINT, exit_handler)
 
@@ -207,31 +240,91 @@ def sticker_message(update, context):
     message.reply_text(reply)
 
 
-chat_filter = Filters.chat()
+sticker_chat_filter = Filters.chat()
 sticker_handler = MessageHandler(
     callback=sticker_message,
-    filters=Filters.sticker & chat_filter,
+    filters=Filters.sticker & sticker_chat_filter,
 )
-if redis.get("state") == State.TAKING_SUBMISSIONS.value:
-    chat_filter.add_chat_ids(int(redis.get("group_id")))
-    dispatcher.add_handler(sticker_handler)
-
+dispatcher.add_handler(sticker_handler)
 
 
 def help_command(update, context):
+    text = fr"Modeled after [XKCD{apos}s Emojidome](https://www.explainxkcd.com/wiki/index.php/2131:_Emojidome), Stickerdome aims to find the ultimate sticker by process of elimination\."
+
+    state = redis.get("state")
+    if state == State.TAKING_SUBMISSIONS.value:
+        text += "\n\nCurrently in submission phase\\. The most submitted stickers advance to the voting phase\\."
+    elif state == State.VOTING.value:
+        text += "\n\nCurrently in voting phase\\. See the pinned message for the latest poll\\."
+    elif state == State.ENDED.value:
+        text += "\n\nThis Stickerdome has ended\\."
+
     with open(project_path / "stickerdome.png", "rb") as img:
         context.bot.send_photo(
             chat_id=update.effective_chat.id,
             photo=img,
             parse_mode=PARSEMODE_MARKDOWN_V2,
-            caption=fr"""Modeled after [XKCD{apos}s Emojidome](https://www.explainxkcd.com/wiki/index.php/2131:_Emojidome), Stickerdome aims to find the ultimate sticker by process of elimination\.
-
-Currently in submission phase\. The most submitted stickers advance to the voting phase\.""",
+            caption=text,
         )
 
 
 help_handler = CommandHandler(command="help", callback=help_command)
 dispatcher.add_handler(help_handler)
+
+
+def voting_command(update, context):
+    if redis.get("state") != State.TAKING_SUBMISSIONS.value:
+        update.effective_message.reply_text("The Stickerdome must be in submission phase to start voting.")
+        return
+    sticker_chat_filter.remove_chat_ids(update.effective_chat.id)
+    redis.set("state", State.VOTING.value)
+    context.bot.send_message(chat_id=update.effective_chat.id, text=f"Submissions closed, it{apos}s voting time!")
+    change_poll(context, "AgADAwADZXlBFQ", "AgADyQUAApl_iAI")
+
+
+voting_handler = CommandHandler(
+    command="voting",
+    callback=voting_command,
+    filters=Filters.user(username=config["admins"]) & Filters.chat_type.groups,
+)
+dispatcher.add_handler(voting_handler)
+
+
+def generate_versus_image(file_id_a, file_id_b, out):
+    with Image.open(project_path / "stickers" / f"{file_id_a}.webp") as img_a, Image.open(project_path / "stickers" / f"{file_id_b}.webp") as img_b:
+        img = Image.open(project_path / "versus-template.png")
+        img.paste(img_a, ((512 - img_a.width) // 2, (512 - img_a.height) // 2 + 100))
+        img.paste(img_b, ((512 - img_b.width) // 2 + 512 + 20, (512 - img_b.height) // 2 + 100))
+        img.save(out, format="PNG")
+
+
+def change_poll(context, sticker_id_a, sticker_id_b):
+    bot = context.bot
+    current_message_id = _int_from_bytes(redis.get("current_stickers_message"))
+    current_poll_id = _int_from_bytes(redis.get("current_poll"))
+    group_id = _int_from_bytes(redis.get("group_id"))
+
+    if group_id is None:
+        raise ValueError("Missing or invalid group_id")
+
+    if current_poll_id is not None:
+        bot.unpin_chat_message(chat_id=group_id, message_id=current_poll_id)
+        bot.stop_poll(chat_id=group_id, message_id=current_poll_id)
+
+    file_ids = []
+    with db:
+        with db.cursor() as cur:
+            for sticker_unique_id in [sticker_id_a, sticker_id_b]:
+                cur.execute("""SELECT "file_id" FROM "stickers" WHERE "id" = %s""", (sticker_unique_id,))
+                file_ids.append(cur.fetchone()[0])
+
+    with io.BytesIO() as img:
+        generate_versus_image(*file_ids, img)
+        stickers_message = bot.send_photo(chat_id=group_id, photo=img.getvalue())
+    poll = bot.send_poll(chat_id=group_id, question="Which shall win?", options=[emoji_a, emoji_b], reply_to_message_id=stickers_message.message_id)
+    bot.pin_chat_message(chat_id=group_id, message_id=poll.message_id)
+    redis.set("current_stickers_message", stickers_message.message_id)
+    redis.set("current_poll", poll.message_id)
 
 
 def start_command(update, context):
@@ -251,7 +344,7 @@ def start_command(update, context):
         return
     redis.set("state", State.TAKING_SUBMISSIONS.value)
     redis.set("group_id", chat_id)
-    chat_filter.add_chat_ids(chat_id)
+    sticker_chat_filter.add_chat_ids(chat_id)
     dispatcher.add_handler(sticker_handler)
     with open(project_path / "stickerdome.png", "rb") as img:
         welcome = context.bot.send_photo(
@@ -268,6 +361,49 @@ def start_command(update, context):
 
 start_handler = CommandHandler(command="start", callback=start_command)
 dispatcher.add_handler(start_handler)
+
+
+def stop_command(update, context):
+    reset()
+    context.bot.send_message(chat_id=update.effective_chat.id, text="The Stickerdome has been reset.")
+
+
+stop_handler = CommandHandler(
+    command="stop",
+    callback=stop_command,
+    filters=Filters.user(username=config["admins"]) & Filters.chat_type.groups,
+)
+dispatcher.add_handler(stop_handler)
+
+
+state = redis.get("state")
+group_id_bytes = redis.get("group_id")
+group_id = _int_from_bytes(group_id_bytes)
+
+if state not in _enum_values(State):
+    raise ValueError("Invalid state in Redis")
+
+if state == State.NOT_STARTED.value:
+    if group_id_bytes is not None:
+        raise ValueError("group_id should not exist in Redis")
+
+if state in [State.TAKING_SUBMISSIONS.value, State.VOTING.value, State.ENDED.value]:
+    if group_id is None:
+        raise ValueError("Missing or invalid group_id in Redis")
+
+if state == State.TAKING_SUBMISSIONS.value:
+    for key in ["current_stickers_message", "current_poll"]:
+        if redis.get(key) is not None:
+            raise ValueError(f"{key} should not exist in Redis")
+    sticker_chat_filter.add_chat_ids(group_id)
+
+if state == State.VOTING.value:
+    for key in ["current_stickers_message", "current_poll"]:
+        if _int_from_bytes(redis.get(key)) is None:
+            raise ValueError(f"Missing or invalid {key} in Redis")
+
+if (group_id := _int_from_bytes(redis.get("group_id"))) is not None:
+    bot.send_message(chat_id=group_id, text="The Stickerdome is back up! Sorry for the downtime.")
 
 updater.start_webhook(
     listen="127.0.0.1",
