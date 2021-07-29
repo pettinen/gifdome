@@ -77,7 +77,7 @@ redis = Redis(unix_socket_path=config["redis_socket"], db=config["redis_db"])
 def reset():
     with db:
         with db.cursor() as cur:
-            cur.execute("""DELETE FROM "submissions"; DELETE FROM "stickers"; DELETE FROM "users";""")
+            cur.execute('DELETE FROM "submissions"')
     redis.set("state", State.NOT_STARTED.value)
     for key in ["group_id", "current_stickers_message", "current_poll"]:
         redis.delete(key)
@@ -176,14 +176,14 @@ def upsert_user(user):
 def add_submission(user, sticker):
     def get_user_submission_count(cur):
         cur.execute(
-            """SELECT COUNT(*) FROM "stickers" WHERE "submitter" = %s""",
+            'SELECT COUNT(*) FROM "stickers" WHERE "submitter" = %s',
             (user.id,)
         )
         return cur.fetchone()[0]
 
     def get_sticker_submission_count(cur):
         cur.execute(
-            """SELECT COUNT(*) FROM "submissions" WHERE "sticker_id" = %s""",
+            'SELECT COUNT(*) FROM "submissions" WHERE "sticker_id" = %s',
             (sticker.file_unique_id,)
         )
         return cur.fetchone()[0]
@@ -194,11 +194,11 @@ def add_submission(user, sticker):
             user_submissions = get_user_submission_count(cur)
             sticker_submissions = get_sticker_submission_count(cur)
 
-            if sticker_submissions == 0 and user_submissions > max:
-                return f"You{apos}ve reached your limit of {max} submissions."
+            #if sticker_submissions == 0 and user_submissions > max:
+            #    return f"You{apos}ve reached your limit of {max} submissions."
 
             cur.execute(
-                """SELECT COUNT(*) FROM "submissions" WHERE "user_id" = %s AND "sticker_id" = %s""",
+                'SELECT COUNT(*) FROM "submissions" WHERE "user_id" = %s AND "sticker_id" = %s',
                 (user.id, sticker.file_unique_id)
             )
             user_sticker_submissions = cur.fetchone()[0]
@@ -249,6 +249,32 @@ sticker_handler = MessageHandler(
 dispatcher.add_handler(sticker_handler)
 
 
+def bracket_command(update, context):
+    chat_id = update.effective_chat.id
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        context.bot.send_message(
+            chat_id=chat_id,
+            text="The bracket is only available in groups.",
+        )
+        return
+
+    if redis.get("state") not in [State.VOTING.value, State.ENDED.value]:
+        context.bot.send_message(
+            chat_id=chat_id,
+            text="The bracket is not available before the voting phase."
+        )
+        return
+
+    context.bot.send_message(chat_id=chat_id, text="todo")
+
+
+bracket_handler = CommandHandler(
+    command="bracket",
+    callback=bracket_command,
+)
+dispatcher.add_handler(bracket_handler)
+
+
 def help_command(update, context):
     text = fr"Modeled after [XKCD{apos}s Emojidome](https://www.explainxkcd.com/wiki/index.php/2131:_Emojidome), Stickerdome aims to find the ultimate sticker by process of elimination\."
 
@@ -271,6 +297,21 @@ def help_command(update, context):
 
 help_handler = CommandHandler(command="help", callback=help_command)
 dispatcher.add_handler(help_handler)
+
+
+def generate_matches():
+    matches = [{"next": i // 2 + 32, "winner": None} for i in range(62)]
+    matches.append({"next": None, "winner": None})
+    for i, match in enumerate(matches):
+        if i < 48:
+            match["duration"] = 3600
+        elif i < 56:
+            match["duration"] = 3 * 3600
+        elif i < 62:
+            match["duration"] = 6 * 3600
+        else:
+            match["duration"] = 12 * 3600
+    return matches
 
 
 def voting_command(update, context):
@@ -313,15 +354,25 @@ def change_poll(context, sticker_id_a, sticker_id_b):
         bot.stop_poll(chat_id=group_id, message_id=current_poll_id)
 
     file_ids = []
+    sticker_sets = []
     with db:
         with db.cursor() as cur:
             for sticker_unique_id in [sticker_id_a, sticker_id_b]:
-                cur.execute("""SELECT "file_id" FROM "stickers" WHERE "id" = %s""", (sticker_unique_id,))
-                file_ids.append(cur.fetchone()[0])
+                cur.execute("""SELECT "file_id", "set" FROM "stickers" WHERE "id" = %s""", (sticker_unique_id,))
+                file_id, sticker_set = cur.fetchone()
+                file_ids.append(file_id)
+                sticker_sets.append(sticker_set)
+
+    def caption_line(index):
+        emoji = [emoji_a, emoji_b][index]
+        if sticker_sets[index]:
+            return f"Sticker {emoji} is from [this pack](https://t.me/addstickers/{sticker_sets[index]})"
+        return f"Sticker {emoji} has no pack"
+    caption = f"A new battle begins\\!\n{caption_line(0)}\n{caption_line(1)}"
 
     with io.BytesIO() as img:
         generate_versus_image(*file_ids, img)
-        stickers_message = bot.send_photo(chat_id=group_id, photo=img.getvalue())
+        stickers_message = bot.send_photo(chat_id=group_id, photo=img.getvalue(), caption=caption, parse_mode=PARSEMODE_MARKDOWN_V2)
     poll = bot.send_poll(chat_id=group_id, question="Which shall win?", options=[emoji_a, emoji_b], reply_to_message_id=stickers_message.message_id)
     bot.pin_chat_message(chat_id=group_id, message_id=poll.message_id)
     redis.set("current_stickers_message", stickers_message.message_id)
@@ -382,7 +433,10 @@ group_id_bytes = redis.get("group_id")
 group_id = _int_from_bytes(group_id_bytes)
 
 if state not in _enum_values(State):
-    raise ValueError("Invalid state in Redis")
+    if state == b'reset':
+        reset()
+    else:
+        raise ValueError("Invalid state in Redis")
 
 if state == State.NOT_STARTED.value:
     if group_id_bytes is not None:
