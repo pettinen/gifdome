@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "telegram-bot"
+version = "1.0.0"
+description = ""
+authors = ["Jeremias Pettinen <hi@jeremi.as>"]
+license = "ISC"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+python-telegram-bot = "^13.7"
+toml = "^0.10.2"
+psycopg2 = "^2.9.1"
+redis = "^3.5.3"
+
+[tool.poetry.dev-dependencies]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
