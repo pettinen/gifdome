@@ -101,7 +101,8 @@ def exit_handler(signalnum, frame):
     sys.exit(0)
 
 
-signal.signal(signal.SIGINT, exit_handler)
+for signalnum in [signal.SIGINT, signal.SIGTERM]:
+    signal.signal(signalnum, exit_handler)
 
 
 def update_submission_data(*, new_transaction=True):
