@@ -1,3 +1,8 @@
+CREATE TABLE IF NOT EXISTS "sticker_sets" (
+  "id" text PRIMARY KEY,
+  "title" text
+);
+
 CREATE TABLE IF NOT EXISTS "stickers" (
   "id" text PRIMARY KEY,
   "file_id" text NOT NULL,
