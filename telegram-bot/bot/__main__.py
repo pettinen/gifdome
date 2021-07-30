@@ -15,6 +15,7 @@ from PIL import Image
 from redis import Redis
 from telegram import Bot
 from telegram.constants import PARSEMODE_MARKDOWN_V2
+from telegram.error import BadRequest
 from telegram.ext import CommandHandler, MessageHandler, PollHandler, Updater
 from telegram.ext.filters import Filters
 from telegram.utils.request import Request
@@ -166,7 +167,11 @@ def update_match_data():
         description = "This Stickerdome has ended."
     else:
         description = "The Stickerdome aims to find the ultimate sticker by process of elimination."
-    bot.set_chat_description(chat_id=group_id, description=description)
+    try:
+        bot.set_chat_description(chat_id=group_id, description=description)
+    except BadRequest as e:
+        if e.message != "Chat description is not modified":
+            raise e
 
     data = []
     matches_raw = redis.get("matches")
@@ -636,7 +641,17 @@ def next_match():
 
     group_id = _int_from_bytes(redis.get("group_id"))
     bot.unpin_chat_message(chat_id=group_id, message_id=current_poll_message_id)
-    old_poll = bot.stop_poll(chat_id=group_id, message_id=current_poll_message_id)
+
+    old_poll = None
+    try:
+        old_poll = bot.stop_poll(chat_id=group_id, message_id=current_poll_message_id)
+    except BadRequest as e:
+        if e.message != "Poll has already been closed":
+            raise e
+
+    if old_poll is None:
+        bot.send_message(chat_id=group_id, text="Oopsie! This requires some manual attention.")
+        return
 
     if old_poll.options[0].voter_count > old_poll.options[1].voter_count:
         winner_id = current_match_participants[0]
