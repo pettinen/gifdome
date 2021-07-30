@@ -480,7 +480,7 @@ def generate_matches():
             match["duration"] = 24 * hour
     if DEBUG:
         for match in matches:
-            match["duration"] = 5
+            match["duration"] = config["debug"]["match_duration"]
     return matches
 
 

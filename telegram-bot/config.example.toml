@@ -16,3 +16,4 @@ min_votes = 5
 enabled = false
 autovote_until = 250
 disable_bracket = true
+match_duration = 2
