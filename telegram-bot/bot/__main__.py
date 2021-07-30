@@ -21,17 +21,14 @@ from telegram.ext.filters import Filters
 from telegram.utils.request import Request
 
 
-DEBUG = True
-DEBUG_AUTOVOTE_UNTIL = 252
-DEBUG_DISABLE_BRACKET = True
+project_path = Path(os.getenv("STICKERDOME_DIR", Path(sys.path[0]).parent))
+config = toml.load(project_path / "config.toml")
+
+DEBUG = config["debug"]["enabled"]
 
 apos = "\u2019"
 emoji_a = "\U0001F170\uFE0F"
 emoji_b = "\U0001F171\uFE0F"
-
-project_path = Path(os.getenv("STICKERDOME_DIR", Path(sys.path[0]).parent))
-
-config = toml.load(project_path / "config.toml")
 
 logging.basicConfig(filename=config["log_file"], level=logging.INFO)
 
@@ -633,12 +630,12 @@ def next_match():
     print("old match is", current_match_index, current_match)
     print("old participants are", current_match_participants)
 
-    if DEBUG and current_match_index < DEBUG_AUTOVOTE_UNTIL:
+    if DEBUG and current_match_index < config["debug"]["autovote_until"]:
         import random
         winner_id = random.choice(current_match_participants)
         matches[current_match_index]["winner"] = winner_id
         redis.set("matches", json.dumps(matches))
-        if not DEBUG_DISABLE_BRACKET:
+        if not config["debug"]["disable_bracket"]:
             update_bracket_image()
         redis.set("current_match", current_match_index + 1)
         next_match()
@@ -647,27 +644,28 @@ def next_match():
     current_poll_message_id = _int_from_bytes(redis.get("current_poll_message"))
 
     group_id = _int_from_bytes(redis.get("group_id"))
-    bot.unpin_chat_message(chat_id=group_id, message_id=current_poll_message_id)
 
     old_poll = None
-    try:
-        old_poll = bot.stop_poll(chat_id=group_id, message_id=current_poll_message_id)
-    except BadRequest as e:
-        if e.message != "Poll has already been closed":
-            raise e
+    if current_poll_message_id is not None:
+        bot.unpin_chat_message(chat_id=group_id, message_id=current_poll_message_id)
+        try:
+            old_poll = bot.stop_poll(chat_id=group_id, message_id=current_poll_message_id)
+        except BadRequest as e:
+            if e.message != "Poll has already been closed":
+                raise e
 
     if old_poll is None:
         bot.send_message(chat_id=group_id, text="Oopsie! This requires some manual attention.")
         return
-
-    if old_poll.options[0].voter_count > old_poll.options[1].voter_count:
-        winner_id = current_match_participants[0]
-    elif old_poll.options[0].voter_count < old_poll.options[1].voter_count:
-        winner_id = current_match_participants[1]
     else:
-        # Tiebreaker
-        bot.send_message(chat_id=group_id, text="Tossing a coin to determine the winner.")
-        winner_id = current_match_participants(secrets.randbelow(2))
+        if old_poll.options[0].voter_count > old_poll.options[1].voter_count:
+            winner_id = current_match_participants[0]
+        elif old_poll.options[0].voter_count < old_poll.options[1].voter_count:
+            winner_id = current_match_participants[1]
+        else:
+            # Tiebreaker
+            bot.send_message(chat_id=group_id, text="Tossing a coin to determine the winner.")
+            winner_id = current_match_participants(secrets.randbelow(2))
 
     with db:
         with db.cursor() as cur:
@@ -749,16 +747,14 @@ def next_command(update, context):
         return
 
     poll_start = _int_from_bytes(redis.get("current_poll_start"))
-    if poll_start is None:
-        return
-
-    if _now() - poll_start < match["duration"]:
-        poll_end = poll_start + match["duration"]
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"This poll can be closed in {_duration(poll_end - _now())}."
-        )
-        return
+    if poll_start is not None:
+        if _now() - poll_start < match["duration"]:
+            poll_end = poll_start + match["duration"]
+            context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"This poll can be closed in {_duration(poll_end - _now())}."
+            )
+            return
 
     voter_count = _int_from_bytes(redis.get("current_voter_count"))
     if voter_count is not None and voter_count < config["min_votes"]:
