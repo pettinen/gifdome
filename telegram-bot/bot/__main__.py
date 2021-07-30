@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import os
+import re
 import signal
 import secrets
 import sys
@@ -518,6 +519,38 @@ voting_handler = CommandHandler(
     filters=Filters.user(username=config["admins"]) & Filters.chat_type.groups,
 )
 dispatcher.add_handler(voting_handler)
+
+
+def markdown_escape(text):
+    return re.sub(r"[\\_*\[\]()~`>#+\-=|{}.!]", r"\\\g<0>", text)
+
+
+def sticker_sets_command(update, context):
+    sets = []
+    with db:
+        with db.cursor() as select_cur, db.cursor() as insert_cur:
+            select_cur.execute('SELECT DISTINCT "set" FROM "stickers"')
+            for set_id, in select_cur:
+                set_ = context.bot.get_sticker_set(set_id)
+                insert_cur.execute(
+                    """
+                    INSERT INTO "sticker_sets"("id", "title") VALUES (%s, %s)
+                    ON CONFLICT ("id") DO NOTHING
+                    """,
+                    (set_.name, set_.title)
+                )
+    context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="done!",
+    )
+
+
+sticker_sets_handler = CommandHandler(
+    command="stickersets",
+    callback=sticker_sets_command,
+    filters=Filters.user(username=config["admins"]),
+)
+dispatcher.add_handler(sticker_sets_handler)
 
 
 def generate_versus_image(file_id_a, file_id_b, out):
