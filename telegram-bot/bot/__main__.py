@@ -135,6 +135,39 @@ update_submission_data()
 
 
 def update_match_data():
+    if (group_id := _int_from_bytes(redis.get("group_id"))) is None:
+        return
+
+    state = redis.get("state")
+    if state == State.TAKING_SUBMISSIONS.value:
+        description = "Send your dankest stickers!"
+    elif state == State.VOTING.value:
+        match_num = _int_from_bytes(redis.get("current_match"))
+        if match_num < 128:
+            round_of = "round of 256"
+        elif match_num < 192:
+            round_of = "round of 128"
+        elif match_num < 224:
+            round_of = "round of 64"
+        elif match_num < 240:
+            round_of = "round of 32"
+        elif match_num < 248:
+            round_of = "round of 16"
+        elif match_num < 252:
+            round_of = "quarterfinals"
+        elif match_num < 254:
+            round_of = "semifinals"
+        elif match_num == 254:
+            round_of = "the FINALE"
+        else:
+            round_of = f"wait, that shouldn{apos}t happen"
+        description = f"Vote for the ultimate sticker!\nCurrent vote: {match_num + 1}/255 ({round_of})"
+    elif state == State.ENDED.value:
+        description = "This Stickerdome has ended."
+    else:
+        description = "The Stickerdome aims to find the ultimate sticker by process of elimination."
+    bot.set_chat_description(chat_id=group_id, description=description)
+
     data = []
     matches_raw = redis.get("matches")
     if matches_raw is not None:
@@ -321,11 +354,11 @@ def bracket_command(update, context):
     current_match_index = _int_from_bytes(redis.get("current_match"))
     if (
         current_match_index is None
-        or (state == State.VOTING.value and current_match_index < 192)
+        or (state == State.VOTING.value and current_match_index < 128)
     ):
         context.bot.send_message(
             chat_id=chat_id,
-            text="The bracket is not available before the round of 64.",
+            text="The bracket is not available before the round of 128.",
         )
         return
 
@@ -344,7 +377,7 @@ dispatcher.add_handler(bracket_handler)
 
 def update_bracket_image():
     current_match_index = _int_from_bytes(redis.get("current_match"))
-    if redis.get("matches") is None or current_match_index < 192:
+    if redis.get("matches") is None or current_match_index < 128:
         return
 
     coords = {128: (82, 82), 129: (82, 222), 130: (82, 362), 131: (82, 502), 132: (82, 642), 133: (82, 782), 134: (82, 922), 135: (82, 1062), 136: (82, 1202), 137: (82, 1342), 138: (82, 1482), 139: (82, 1622), 140: (82, 1762), 141: (82, 1902), 142: (82, 2042), 143: (82, 2182), 144: (82, 2322), 145: (82, 2462), 146: (82, 2602), 147: (82, 2742), 148: (82, 2882), 149: (82, 3022), 150: (82, 3162), 151: (82, 3302), 152: (82, 3442), 153: (82, 3582), 154: (82, 3722), 155: (82, 3862), 156: (82, 4002), 157: (82, 4142), 158: (82, 4282), 159: (82, 4422), 160: (6334, 82), 161: (6334, 222), 162: (6334, 362), 163: (6334, 502), 164: (6334, 642), 165: (6334, 782), 166: (6334, 922), 167: (6334, 1062), 168: (6334, 1202), 169: (6334, 1342), 170: (6334, 1482), 171: (6334, 1622), 172: (6334, 1762), 173: (6334, 1902), 174: (6334, 2042), 175: (6334, 2182), 176: (6334, 2322), 177: (6334, 2462), 178: (6334, 2602), 179: (6334, 2742), 180: (6334, 2882), 181: (6334, 3022), 182: (6334, 3162), 183: (6334, 3302), 184: (6334, 3442), 185: (6334, 3582), 186: (6334, 3722), 187: (6334, 3862), 188: (6334, 4002), 189: (6334, 4142), 190: (6334, 4282), 191: (6334, 4422), 192: (464, 152), 193: (464, 432), 194: (464, 712), 195: (464, 992), 196: (464, 1272), 197: (464, 1552), 198: (464, 1832), 199: (464, 2112), 200: (464, 2392), 201: (464, 2672), 202: (464, 2952), 203: (464, 3232), 204: (464, 3512), 205: (464, 3792), 206: (464, 4072), 207: (464, 4352), 208: (5952, 152), 209: (5952, 432), 210: (5952, 712), 211: (5952, 992), 212: (5952, 1272), 213: (5952, 1552), 214: (5952, 1832), 215: (5952, 2112), 216: (5952, 2392), 217: (5952, 2672), 218: (5952, 2952), 219: (5952, 3232), 220: (5952, 3512), 221: (5952, 3792), 222: (5952, 4072), 223: (5952, 4352), 224: (846, 292), 225: (846, 852), 226: (846, 1412), 227: (846, 1972), 228: (846, 2532), 229: (846, 3092), 230: (846, 3652), 231: (846, 4212), 232: (5570, 292), 233: (5570, 852), 234: (5570, 1412), 235: (5570, 1972), 236: (5570, 2532), 237: (5570, 3092), 238: (5570, 3652), 239: (5570, 4212), 240: (1099, 508), 241: (1099, 1628), 242: (1099, 2748), 243: (1099, 3868), 244: (5189, 508), 245: (5189, 1628), 246: (5189, 2748), 247: (5189, 3868), 248: (1611, 1068), 249: (1611, 3308), 250: (4677, 1068), 251: (4677, 3308), 252: (2180, 1528), 253: (3852, 2592), 254: (3016, 2060)}
