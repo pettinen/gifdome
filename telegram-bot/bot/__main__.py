@@ -21,6 +21,10 @@ from telegram.ext.filters import Filters
 from telegram.utils.request import Request
 
 
+DEBUG = True
+DEBUG_AUTOVOTE_UNTIL = 252
+DEBUG_DISABLE_BRACKET = True
+
 apos = "\u2019"
 emoji_a = "\U0001F170\uFE0F"
 emoji_b = "\U0001F171\uFE0F"
@@ -327,7 +331,7 @@ def send_bracket(chat_id, caption=None, parse_mode=None):
         scale = 5000 / img.width
         smaller = img.resize(
             ((round(scale * img.width), round(scale * img.height))),
-            resample = Image.LANCZOS
+            resample = Image.LANCZOS,
         )
         with io.BytesIO() as f:
             smaller.save(f, "PNG")
@@ -458,7 +462,7 @@ def generate_matches():
     ]
     matches.extend(
         {"next": i // 2 + 128, "winner": None}
-        for i in range(128, 256)
+        for i in range(128, 255)
     )
     matches[-1]["next"] = None
     hour = 3600
@@ -477,6 +481,9 @@ def generate_matches():
             match["duration"] = 12 * hour
         else:
             match["duration"] = 24 * hour
+    if DEBUG:
+        for match in matches:
+            match["duration"] = 5
     return matches
 
 
@@ -626,13 +633,13 @@ def next_match():
     print("old match is", current_match_index, current_match)
     print("old participants are", current_match_participants)
 
-    DEBUG = False
-    if DEBUG and current_match_index < 240:
+    if DEBUG and current_match_index < DEBUG_AUTOVOTE_UNTIL:
         import random
         winner_id = random.choice(current_match_participants)
         matches[current_match_index]["winner"] = winner_id
         redis.set("matches", json.dumps(matches))
-        update_bracket_image()
+        if not DEBUG_DISABLE_BRACKET:
+            update_bracket_image()
         redis.set("current_match", current_match_index + 1)
         next_match()
         return
@@ -670,7 +677,6 @@ def next_match():
     matches[current_match_index]["winner"] = winner_id
     redis.set("matches", json.dumps(matches))
     update_bracket_image()
-    update_match_data()
 
     end = current_match["next"] is None
 
@@ -680,6 +686,7 @@ def next_match():
 
     if end:
         redis.set("state", State.ENDED.value)
+        update_match_data()
         send_bracket(
             chat_id=group_id,
             caption=r"Ohi on\! kiitos pelaamisesta ja onnea voittajalle",
@@ -691,6 +698,7 @@ def next_match():
         new_participants = match_participants(new_match_index, matches)
         new_poll(new_participants, new_match["duration"])
         redis.set("current_match", new_match_index)
+        update_match_data()
 
 
 def poll_update(update, context):
