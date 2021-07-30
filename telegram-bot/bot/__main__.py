@@ -526,22 +526,16 @@ def markdown_escape(text):
 
 
 def sticker_sets_command(update, context):
-    sets = []
+    lines = []
     with db:
-        with db.cursor() as select_cur, db.cursor() as insert_cur:
-            select_cur.execute('SELECT DISTINCT "set" FROM "stickers"')
-            for set_id, in select_cur:
-                set_ = context.bot.get_sticker_set(set_id)
-                insert_cur.execute(
-                    """
-                    INSERT INTO "sticker_sets"("id", "title") VALUES (%s, %s)
-                    ON CONFLICT ("id") DO NOTHING
-                    """,
-                    (set_.name, set_.title)
-                )
+        with db.cursor() as cur:
+            cur.execute('SELECT "id", "title" FROM "sticker_sets"')
+            for id_, title in cur:
+                lines.append(f"[{markdown_escape(title)}](https://t.me/addstickers/{id_})")
     context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text="done!",
+        text="\n".join(lines),
+        parse_mode=PARSEMODE_MARKDOWN_V2,
     )
 
 
