@@ -10,3 +10,4 @@ redis_db = 15
 redis_socket = "/run/redis/redis.sock"
 
 max_submissions = 10
+min_votes = 5
