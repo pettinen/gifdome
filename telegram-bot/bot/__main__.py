@@ -589,7 +589,6 @@ def new_poll(sticker_ids, match_duration):
     bot.pin_chat_message(chat_id=group_id, message_id=poll_message.message_id)
     redis.set("current_stickers_message", stickers_message.message_id)
     redis.set("current_poll_message", poll_message.message_id)
-    print("Set current_poll to", poll_message.poll.id)
     redis.set("current_poll", poll_message.poll.id)
     redis.set("current_poll_start", _now())
     redis.set("current_voter_count", 0)
@@ -665,7 +664,7 @@ def next_match():
         else:
             # Tiebreaker
             bot.send_message(chat_id=group_id, text="Tossing a coin to determine the winner.")
-            winner_id = current_match_participants(secrets.randbelow(2))
+            winner_id = current_match_participants[secrets.randbelow(2)]
 
     with db:
         with db.cursor() as cur:
@@ -859,10 +858,10 @@ if state == State.TAKING_SUBMISSIONS.value:
 if state == State.VOTING.value:
     for key in [
         "current_match",
-        "current_stickers_message",
-        "current_poll_message",
-        "current_poll",
-        "current_poll_start",
+        #"current_stickers_message",
+        #"current_poll_message",
+        #"current_poll",
+        #"current_poll_start",
     ]:
         if _int_from_bytes(redis.get(key)) is None:
             raise ValueError(f"Missing or invalid {key} in Redis")
