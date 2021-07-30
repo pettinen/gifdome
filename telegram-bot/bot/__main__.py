@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import signal
+import secrets
 import sys
 from datetime import datetime
 from enum import Enum
@@ -91,6 +92,7 @@ def reset():
         "current_poll_message",
         "current_poll",
         "current_poll_start",
+        "current_voter_count",
         "matches",
         #"seeding",
     ]:
@@ -130,6 +132,31 @@ def update_submission_data(*, new_transaction=True):
 
 
 update_submission_data()
+
+
+def update_match_data():
+    data = []
+    matches_raw = redis.get("matches")
+    if matches_raw is not None:
+        with db:
+            with db.cursor() as cur:
+                def get_file_id(sticker_id):
+                    if sticker_id is None:
+                        return sticker_id
+                    cur.execute('SELECT "file_id" FROM "stickers" WHERE "id" = %s', (sticker_id,))
+                    if (row := cur.fetchone()) is None:
+                        return None
+                    return row[0]
+
+                matches = json.loads(matches_raw)
+                for index, match in enumerate(matches):
+                    match["participants"] = [
+                        get_file_id(id) for id in match_participants(index, matches)
+                    ]
+                    match["winner"] = get_file_id(match["winner"])
+                    data.append(match)
+    with open(project_path / "matches.json", "w") as f:
+        json.dump(data, f)
 
 
 def upsert_sticker(sticker, user):
@@ -374,7 +401,6 @@ help_handler = CommandHandler(command="help", callback=help_command)
 dispatcher.add_handler(help_handler)
 
 
-
 def match_participants(index, matches):
     if index < 128:
         seeding = json.loads(redis.get("seeding"))
@@ -388,11 +414,14 @@ def match_participants(index, matches):
 
 
 def generate_matches():
-    participants = 256
+    next = [128, 160, 144, 176, 184, 152, 168, 136, 140, 172, 156, 188, 180, 148, 164, 132, 134, 166, 150, 182, 190, 158, 174, 142, 138, 170, 154, 186, 178, 146, 162, 130, 131, 163, 147, 179, 187, 155, 171, 139, 143, 175, 159, 191, 183, 151, 167, 135, 133, 165, 149, 181, 189, 157, 173, 141, 137, 169, 153, 185, 177, 145, 161, 129, 129, 161, 145, 177, 185, 153, 169, 137, 141, 173, 157, 189, 181, 149, 165, 133, 135, 167, 151, 183, 191, 159, 175, 143, 139, 171, 155, 187, 179, 147, 163, 131, 130, 162, 146, 178, 186, 154, 170, 138, 142, 174, 158, 190, 182, 150, 166, 134, 132, 164, 148, 180, 188, 156, 172, 140, 136, 168, 152, 184, 176, 144, 160, 128]
     matches = [
-        {"next": i // 2 + participants // 2, "winner": None}
-        for i in range(participants - 1)
+        {"next": next[i], "winner": None} for i in range(128)
     ]
+    matches.extend(
+        {"next": i // 2 + 128, "winner": None}
+        for i in range(128, 256)
+    )
     matches[-1]["next"] = None
     hour = 3600
     for i, match in enumerate(matches):
@@ -521,6 +550,7 @@ def new_poll(sticker_ids, match_duration):
     print("Set current_poll to", poll_message.poll.id)
     redis.set("current_poll", poll_message.poll.id)
     redis.set("current_poll_start", _now())
+    redis.set("current_voter_count", 0)
 
 
 def current_match():
@@ -580,7 +610,9 @@ def next_match():
     elif old_poll.options[0].voter_count < old_poll.options[1].voter_count:
         winner_id = current_match_participants[1]
     else:
-        raise ValueError("Unexpected tie")
+        # Tiebreaker
+        bot.send_message(chat_id=group_id, text="Tossing a coin to determine the winner.")
+        winner_id = current_match_participants(secrets.randbelow(2))
 
     with db:
         with db.cursor() as cur:
@@ -590,6 +622,7 @@ def next_match():
     matches[current_match_index]["winner"] = winner_id
     redis.set("matches", json.dumps(matches))
     update_bracket_image()
+    update_match_data()
 
     end = current_match["next"] is None
 
@@ -614,7 +647,6 @@ def next_match():
 
 def poll_update(update, context):
     poll = update.poll
-    print(poll)
     if poll.is_closed:
         print("this poll is closed")
         return
@@ -627,6 +659,8 @@ def poll_update(update, context):
         print("not current poll")
         return
 
+    redis.set("current_voter_count", poll.total_voter_count)
+
     if poll.total_voter_count < config["min_votes"]:
         print("not enough votes")
         return
@@ -637,24 +671,56 @@ def poll_update(update, context):
 
     poll_start = _int_from_bytes(redis.get("current_poll_start"))
     if poll_start is None:
-        print("can't get poll-start")
         return
 
     match = current_match()
     if match is None:
         return
 
-    match_duration = match["duration"]
-    if _now() - poll_start < match_duration:
-        print("not old enough")
+    if _now() - poll_start < match["duration"]:
         return
 
-    print("going to next match")
     next_match()
 
 
 poll_handler = PollHandler(callback=poll_update)
 dispatcher.add_handler(poll_handler)
+
+
+def next_command(update, context):
+    match = current_match()
+    if match is None:
+        return
+
+    poll_start = _int_from_bytes(redis.get("current_poll_start"))
+    if poll_start is None:
+        return
+
+    if _now() - poll_start < match["duration"]:
+        poll_end = poll_start + match["duration"]
+        context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"This poll can be closed in {_duration(poll_end - _now())}."
+        )
+        return
+
+    voter_count = _int_from_bytes(redis.get("current_voter_count"))
+    if voter_count is not None and voter_count < config["min_votes"]:
+        context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Not enough votes to change poll."
+        )
+        return
+
+    next_match()
+
+
+next_handler = CommandHandler(
+    command="next",
+    callback=next_command,
+    filters=Filters.chat_type.groups
+)
+dispatcher.add_handler(next_handler)
 
 
 def start_command(update, context):
@@ -731,8 +797,8 @@ if state == State.TAKING_SUBMISSIONS.value:
         "current_poll_message",
         "current_poll",
         "current_poll_start",
+        "current_voter_count",
         "matches",
-        "seeding",
     ]:
         if redis.get(key) is not None:
             raise ValueError(f"{key} should not exist in Redis")
@@ -754,6 +820,9 @@ if state == State.VOTING.value:
     ]:
         if redis.get(key) is None:
             raise ValueError(f"Missing {key} in Redis")
+
+
+update_match_data()
 
 
 if (group_id := _int_from_bytes(redis.get("group_id"))) is not None:

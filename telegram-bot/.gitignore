@@ -1,5 +1,6 @@
-__pycache__/
 /stickers/
 /bracket.png
 /config.toml
+/matches.json
 /submissions.json
+__pycache__/
