@@ -226,6 +226,8 @@ def upsert_sticker(sticker, user):
         )
     db.commit()
 
+    # TODO: fetch and upsert sticker set
+
     file_path = project_path / "stickers" / f"{sticker.file_id}.webp"
     if not file_path.is_file():
         with open(file_path, "wb") as f:
@@ -581,20 +583,30 @@ def new_poll(sticker_ids, match_duration):
         raise ValueError("Missing or invalid group_id")
 
     file_ids = []
-    sticker_sets = []
+    sticker_set_ids = []
+    sticker_set_titles = []
     with db:
         with db.cursor() as cur:
             print("sticker ids:", sticker_ids)
             for sticker_unique_id in sticker_ids:
-                cur.execute("""SELECT "file_id", "set" FROM "stickers" WHERE "id" = %s""", (sticker_unique_id,))
-                file_id, sticker_set = cur.fetchone()
+                cur.execute(
+                    """
+                    SELECT "stickers"."file_id", "stickers"."set", "sticker_sets"."title"
+                    FROM "stickers" LEFT JOIN "sticker_sets"
+                        ON "stickers"."set" = "sticker_sets"."id"
+                    WHERE "stickers"."id" = %s
+                    """,
+                    (sticker_unique_id,))
+                file_id, set_id, set_title = cur.fetchone()
                 file_ids.append(file_id)
-                sticker_sets.append(sticker_set)
+                sticker_set_ids.append(set_id)
+                sticker_set_titles.append(set_title)
 
     def caption_line(index):
         emoji = [emoji_a, emoji_b][index]
-        if sticker_sets[index]:
-            return fr"Sticker {emoji} is from [this pack](https://t.me/addstickers/{sticker_sets[index]})\."
+        set_title = sticker_set_titles[index] or "this pack"
+        if set_id := sticker_set_ids[index]:
+            return fr"Sticker {emoji} is from [{markdown_escape(set_title)}](https://t.me/addstickers/{set_id})\."
         return fr"Sticker {emoji} has no pack\."
 
     caption = "\n".join([
