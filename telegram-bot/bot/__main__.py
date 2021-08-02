@@ -696,9 +696,11 @@ def next_match():
         bot.send_message(chat_id=group_id, text="Oopsie! This requires some manual attention.")
         return
     else:
-        if old_poll.options[0].voter_count > old_poll.options[1].voter_count:
+        votes_a = old_poll.options[0].voter_count
+        votes_b = old_poll.options[1].voter_count
+        if votes_a > votes_b:
             winner_id = current_match_participants[0]
-        elif old_poll.options[0].voter_count < old_poll.options[1].voter_count:
+        elif votes_a < votes_b:
             winner_id = current_match_participants[1]
         else:
             # Tiebreaker
@@ -711,6 +713,7 @@ def next_match():
             winner_file_id, = cur.fetchone()
 
     matches[current_match_index]["winner"] = winner_id
+    matches[current_match_index]["votes"] = [votes_a, votes_b]
     redis.set("matches", json.dumps(matches))
     update_bracket_image()
 
@@ -725,7 +728,7 @@ def next_match():
         update_match_data()
         send_bracket(
             chat_id=group_id,
-            caption=r"Ohi on\! kiitos pelaamisesta ja onnea voittajalle",
+            caption=r"Ohi on\! kiitos pelaamisesta vaikka äänestitte VÄÄRIN",
         )
     else:
         bot.send_message(chat_id=group_id, text="We have a winner!")
@@ -780,6 +783,18 @@ dispatcher.add_handler(poll_handler)
 
 
 def next_command(update, context):
+    if redis.get("state") != State.VOTING.value:
+        return
+
+    match_index = _int_from_bytes(redis.get("current_match"))
+    if match_index is not None and match_index >= 248:
+        if update.effective_user.username not in config["admins"]:
+            context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Only admins can use /next at this stage.",
+            )
+            return
+
     match = current_match()
     if match is None:
         return
@@ -811,6 +826,13 @@ next_handler = CommandHandler(
     filters=Filters.chat_type.groups
 )
 dispatcher.add_handler(next_handler)
+
+end_handler = CommandHandler(
+    command="end",
+    callback=next_command,
+    filters=Filters.chat_type.groups & Filters.user(username=config["admins"])
+)
+dispatcher.add_handler(end_handler)
 
 
 def start_command(update, context):
