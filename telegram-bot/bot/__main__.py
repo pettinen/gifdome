@@ -105,7 +105,10 @@ def reset():
 def exit_handler(signalnum, frame):
     db.close()
     redis.close()
-    if (group_id := _int_from_bytes(redis.get("group_id"))) is not None:
+    if (
+        config["downtime_notifications"]
+        and (group_id := _int_from_bytes(redis.get("group_id"))) is not None
+    ):
         bot.send_message(chat_id=group_id, text="Stickerdome going down for maintenance and shit...")
     sys.exit(0)
 
@@ -933,11 +936,12 @@ if state == State.VOTING.value:
         if redis.get(key) is None:
             raise ValueError(f"Missing {key} in Redis")
 
-
 update_match_data()
 
-
-if (group_id := _int_from_bytes(redis.get("group_id"))) is not None:
+if (
+    config["downtime_notifications"]
+    and (group_id := _int_from_bytes(redis.get("group_id"))) is not None
+):
     bot.send_message(chat_id=group_id, text="The Stickerdome is back up! Sorry for the downtime.")
 
 updater.start_webhook(

@@ -6,6 +6,8 @@ log_file = "/var/log/stickerdome/stickerdome.log"
 webhook_port = 9001
 webhook_url = "https://example.com/SOMETHING_RANDOM"
 
+downtime_notifications = true
+
 redis_db = 15
 redis_socket = "/run/redis/redis.sock"
 
