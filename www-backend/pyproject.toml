@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "stickerdome-www-backend"
+version = "1.0.0"
+description = ""
+authors = ["Jeremias Pettinen <hi@jeremi.as>"]
+license = "ISC"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+Flask = "^2.0.1"
+psycopg2 = "^2.9.1"
+uwsgi = {url = "https://github.com/pettinen/uwsgi/archive/refs/heads/uwsgi-2.0.tar.gz"}
+redis = "^3.5.3"
+
+[tool.poetry.dev-dependencies]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

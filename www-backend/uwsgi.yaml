@@ -1,0 +1,7 @@
+uwsgi:
+  daemonize: /var/log/stickerdome/uwsgi.log
+  socket: /run/stickerdome/www-backend.sock
+  chmod-socket: 660
+  master: true
+  mount: /api=app:create_app()
+  uid: stickerdome

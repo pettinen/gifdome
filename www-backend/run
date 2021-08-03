@@ -1,0 +1,5 @@
+#!/bin/sh
+
+cd "$(dirname "$0")"
+
+/home/stickerdome/.poetry/bin/poetry run uwsgi --yaml uwsgi.yaml
