@@ -789,20 +789,25 @@ def next_command(update, context):
     if redis.get("state") != State.VOTING.value:
         return
 
-    match_index = _int_from_bytes(redis.get("current_match"))
-    if match_index is not None and match_index >= 248:
-        if update.effective_user.username not in config["admins"]:
-            context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="Only admins can use /next at this stage.",
-            )
-            return
-
     match = current_match()
     if match is None:
         return
 
     poll_start = _int_from_bytes(redis.get("current_poll_start"))
+
+    match_index = _int_from_bytes(redis.get("current_match"))
+    if match_index is not None and match_index >= 248:
+        if update.effective_user.username not in config["admins"]:
+            texts = ["Only admins can use /next at this stage."]
+            if poll_start is not None and _now() - poll_start < match["duration"]:
+                    poll_end = poll_start + match["duration"]
+                    texts.append(f"This poll can be closed in {_duration(poll_end - _now())}.")
+            context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=" ".join(texts),
+            )
+            return
+
     if poll_start is not None:
         if _now() - poll_start < match["duration"]:
             poll_end = poll_start + match["duration"]
@@ -936,6 +941,7 @@ if state == State.VOTING.value:
         if redis.get(key) is None:
             raise ValueError(f"Missing {key} in Redis")
 
+update_bracket_image()
 update_match_data()
 
 if (
