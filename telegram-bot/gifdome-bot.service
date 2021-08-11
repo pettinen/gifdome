@@ -1,0 +1,13 @@
+[Unit]
+Description=GIFdome Telegram bot
+After=network.target
+
+[Service]
+ExecStart=bash run
+LogsDirectory=gifdome
+User=gifdome
+WorkingDirectory=/home/gifdome/gifdome/telegram-bot
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

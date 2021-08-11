@@ -2,17 +2,19 @@
 
 admins = ["YOUR_USERNAME"]
 api_token = "YOUR_TOKEN"
-log_file = "/var/log/stickerdome/stickerdome.log"
+log_file = "/var/log/gifdome/bot.log"
 webhook_port = 9001
 webhook_url = "https://example.com/SOMETHING_RANDOM"
 
 downtime_notifications = true
 
+db_name = "gifdome"
+
 redis_db = 15
 redis_socket = "/run/redis/redis.sock"
 
-max_submissions = 10
-min_votes = 5
+max_submissions = 20
+min_votes = 7
 
 [debug]
 enabled = false

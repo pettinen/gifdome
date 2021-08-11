@@ -6,7 +6,7 @@ import re
 import signal
 import secrets
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -21,8 +21,21 @@ from telegram.ext import CommandHandler, MessageHandler, PollHandler, Updater
 from telegram.ext.filters import Filters
 from telegram.utils.request import Request
 
+from utils import (
+    apos,
+    duration,
+    emoji_a,
+    emoji_b,
+    enum_values,
+    ext,
+    find_enum_by_value,
+    markdown_escape,
+    now,
+    plural,
+)
 
-project_path = Path(os.getenv("STICKERDOME_DIR", Path(sys.path[0]).parent))
+
+project_path = Path(os.getenv("GIFDOME_DIR", Path(sys.path[0]).parent))
 config = toml.load(project_path / "config.toml")
 
 DEBUG = config["debug"]["enabled"]
@@ -41,26 +54,11 @@ class State(Enum):
     ENDED = b"ended"
 
 
-def _enum_values(enum):
-    return {x.value for x in enum}
-
-
 def _find_enum_by_value(enum, value):
     for x in enum:
         if x.value == value:
             return x
     return None
-
-
-def _int_from_bytes(b):
-    try:
-        return int(b)
-    except (TypeError, ValueError):
-        return None
-
-
-def _now():
-    return int(datetime.now().timestamp())
 
 
 bot = Bot(
@@ -71,7 +69,7 @@ bot = Bot(
 updater = Updater(bot=bot)
 dispatcher = updater.dispatcher
 
-db_name = config.get("db_name", "stickerdome")
+db_name = config.get("db_name", "gifdome")
 db = psycopg2.connect(f"dbname={db_name}")
 
 with db:
@@ -81,6 +79,13 @@ with db:
 
 
 redis = Redis(unix_socket_path=config["redis_socket"], db=config["redis_db"])
+
+
+def redis_get_int(key):
+    try:
+        return int(redis.get(key))
+    except (TypeError, ValueError):
+        return None
 
 
 def reset():
@@ -102,53 +107,37 @@ def reset():
         redis.delete(key)
 
 
+exiting = False
+
 def exit_handler(signalnum, frame):
+    global exiting
     db.close()
     redis.close()
     if (
-        config["downtime_notifications"]
-        and (group_id := _int_from_bytes(redis.get("group_id"))) is not None
+        not exiting
+        and config["downtime_notifications"]
+        and (group_id := redis_get_int("group_id")) is not None
     ):
-        bot.send_message(chat_id=group_id, text="Stickerdome going down for maintenance and shit...")
+        bot.send_message(chat_id=group_id, text="GIFdome going down for maintenance and shit...")
+    exiting = True
+    db.close()
+    redis.close()
     sys.exit(0)
 
 
-for signalnum in [signal.SIGINT, signal.SIGTERM]:
+for signalnum in {signal.SIGINT, signal.SIGTERM}:
     signal.signal(signalnum, exit_handler)
 
 
-def update_submission_data(*, new_transaction=True):
-    data = []
-    with db.cursor() as cur:
-        cur.execute(
-            """
-            SELECT "stickers"."file_id", "stickers"."set", "temp"."count" FROM "stickers" JOIN (
-                SELECT "sticker_id", count("sticker_id") AS "count" FROM "submissions"
-                GROUP BY "sticker_id"
-            ) AS "temp"
-                ON "stickers"."id" = "temp"."sticker_id"
-            """
-        )
-        for file_id, sticker_set, count in cur:
-            data.append({"fileID": file_id, "stickerSet": sticker_set, "count": count})
-    if new_transaction:
-        db.commit()
-    with open(project_path / "submissions.json", "w") as f:
-        json.dump(data, f)
-
-
-update_submission_data()
-
-
-def update_match_data():
-    if (group_id := _int_from_bytes(redis.get("group_id"))) is None:
+def update_chat_description():
+    if (group_id := redis_get_int("group_id")) is None:
         return
 
     state = redis.get("state")
     if state == State.TAKING_SUBMISSIONS.value:
-        description = "Send your dankest stickers!"
+        description = "Send your dankest GIFs!"
     elif state == State.VOTING.value:
-        match_num = _int_from_bytes(redis.get("current_match"))
+        match_num = redis_get_int("current_match")
         if match_num < 128:
             round_of = "round of 256"
         elif match_num < 192:
@@ -167,77 +156,100 @@ def update_match_data():
             round_of = "the FINALE"
         else:
             round_of = f"wait, that shouldn{apos}t happen"
-        description = f"Vote for the ultimate sticker!\nCurrent vote: {match_num + 1}/255 ({round_of})"
+        description = f"Vote for the ultimate GIF!\nCurrent vote: {match_num + 1}/255 ({round_of})"
     elif state == State.ENDED.value:
-        description = "This Stickerdome has ended."
+        description = "This GIFdome has ended."
     else:
-        description = "The Stickerdome aims to find the ultimate sticker by process of elimination."
+        description = "The GIFdome aims to find the ultimate GIF by process of elimination."
     try:
         bot.set_chat_description(chat_id=group_id, description=description)
     except BadRequest as e:
         if e.message != "Chat description is not modified":
             raise e
 
-    data = []
-    matches_raw = redis.get("matches")
-    if matches_raw is not None:
-        with db:
-            with db.cursor() as cur:
-                def get_file_id(sticker_id):
-                    if sticker_id is None:
-                        return sticker_id
-                    cur.execute('SELECT "file_id" FROM "stickers" WHERE "id" = %s', (sticker_id,))
-                    if (row := cur.fetchone()) is None:
-                        return None
-                    return row[0]
 
-                matches = json.loads(matches_raw)
-                for index, match in enumerate(matches):
-                    match["participants"] = [
-                        get_file_id(id) for id in match_participants(index, matches)
-                    ]
-                    match["winner"] = get_file_id(match["winner"])
-                    data.append(match)
-    with open(project_path / "matches.json", "w") as f:
-        json.dump(data, f)
-
-
-def upsert_sticker(sticker, user):
+def upsert_gif(gif, user, *, new_transaction=False):
     with db.cursor() as cur:
         cur.execute(
+            'SELECT count(*) FROM "gifs" WHERE "submitter" = %s',
+            (user.id,),
+        )
+        if cur.rowcount != 1:
+            raise Exception(f"Got {cur.rowcount} rows when counting user submissions")
+        user_submissions, = cur.fetchone()
+
+        cur.execute(
+            'SELECT count(*) FROM "gifs" WHERE "id" = %s',
+            (gif.file_unique_id,),
+        )
+        if cur.rowcount != 1:
+            raise Exception(f"Got {cur.rowcount} rows when counting GIF submissions")
+        gif_submissions, = cur.fetchone()
+
+        max_ = config["max_submissions"]
+        if gif_submissions == 0 and user_submissions >= max_:
+            return f"You{apos}ve already submitted {max_} GIFs."
+
+        cur.execute(
             """
-            INSERT INTO "stickers"("id", "file_id", "set", "width", "height", "submitter")
-                VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO "gifs"(
+                "id",
+                "file_id",
+                "mime_type",
+                "width",
+                "height",
+                "duration",
+                "submitter"
+            )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT ("id") DO UPDATE SET
-                    "file_id" = %s,
-                    "set" = %s,
+                    "mime_type" = %s,
                     "width" = %s,
-                    "height" = %s
+                    "height" = %s,
+                    "duration" = %s
             """,
             (
-                sticker.file_unique_id,
-                sticker.file_id,
-                sticker.set_name,
-                sticker.width,
-                sticker.height,
+                gif.file_unique_id,
+                gif.file_id,
+                gif.mime_type,
+                gif.width,
+                gif.height,
+                gif.duration,
                 user.id,
-                sticker.file_id,
-                sticker.set_name,
-                sticker.width,
-                sticker.height
-            )
+                gif.mime_type,
+                gif.width,
+                gif.height,
+                gif.duration,
+            ),
         )
-    db.commit()
+        if gif.file_name:
+            cur.execute(
+                """
+                INSERT INTO "gif_filenames"("gif_id", "filename") VALUES (%s, %s)
+                    ON CONFLICT ("gif_id", "filename") DO NOTHING
+                """,
+                (gif.file_unique_id, gif.file_name),
+            )
+        cur.execute(
+            'SELECT "file_id", "mime_type" FROM "gifs" WHERE "id" = %s',
+            (gif.file_unique_id,),
+        )
+        if cur.rowcount != 1:
+            raise Exception(f'Got {cur.rowcount} results from "gifs"')
+        file_id, mime_type = cur.fetchone()
 
-    # TODO: fetch and upsert sticker set
+    if new_transaction:
+        db.commit()
 
-    file_path = project_path / "stickers" / f"{sticker.file_id}.webp"
+    file_path = project_path / "gifs" / f"{file_id}{ext(mime_type)}"
     if not file_path.is_file():
         with open(file_path, "wb") as f:
-            bot.get_file(sticker.file_id).download(out=f)
+            gif.get_file().download(out=f)
+
+    return None
 
 
-def upsert_user(user):
+def upsert_user(user, *, new_transaction=False):
     with db.cursor() as cur:
         cur.execute(
             """
@@ -246,79 +258,98 @@ def upsert_user(user):
             """,
             (user.id, user.username, user.username)
         )
-    db.commit()
+    if new_transaction:
+        db.commit()
 
 
-def add_submission(user, sticker):
+def add_submission(message, user, gif, *, new_transaction=False):
     def get_user_submission_count(cur):
         cur.execute(
-            'SELECT COUNT(*) FROM "stickers" WHERE "submitter" = %s',
-            (user.id,)
+            'SELECT count(*) FROM "gifs" WHERE "submitter" = %s',
+            (user.id,),
         )
+        if cur.rowcount != 1:
+            raise Exception(f"Got {cur.rowcount} rows from counting user submissions")
         return cur.fetchone()[0]
 
-    def get_sticker_submission_count(cur):
+    def get_gif_submission_count(cur):
         cur.execute(
-            'SELECT COUNT(*) FROM "submissions" WHERE "sticker_id" = %s',
-            (sticker.file_unique_id,)
+            'SELECT count(*) FROM "submissions" WHERE "gif_id" = %s',
+            (gif.file_unique_id,),
         )
+        if cur.rowcount != 1:
+            raise Exception(f"Got {cur.rowcount} rows from counting GIF submissions")
         return cur.fetchone()[0]
 
-    with db:
-        with db.cursor() as cur:
-            user_submissions = get_user_submission_count(cur)
-            sticker_submissions = get_sticker_submission_count(cur)
+    with db.cursor() as cur:
+        user_submissions = get_user_submission_count(cur)
+        max_ = config["max_submissions"]
 
-            cur.execute(
-                'SELECT COUNT(*) FROM "submissions" WHERE "user_id" = %s AND "sticker_id" = %s',
-                (user.id, sticker.file_unique_id)
+        cur.execute(
+            'SELECT count(*) FROM "submissions" WHERE "user_id" = %s AND "gif_id" = %s',
+            (user.id, gif.file_unique_id),
+        )
+        if cur.rowcount != 1:
+            raise Exception(f"Got {cur.rowcount} rows from counting user's GIF submissions")
+        user_gif_submissions = cur.fetchone()[0]
+        if user_gif_submissions != 0:
+            message.reply_text(f"You{apos}ve already submitted this GIF.")
+            return
+
+        cur.execute(
+            'INSERT INTO "submissions"("user_id", "gif_id", "created") VALUES (%s, %s, %s)',
+            (user.id, gif.file_unique_id, datetime.now(timezone.utc)),
+        )
+        if cur.rowcount != 1:
+            raise Exception(f"{cur.rowcount} rows inserted into submissions")
+
+        gif_submissions = get_gif_submission_count(cur)
+        user_submissions = get_user_submission_count(cur)
+        if gif_submissions == 0:
+            raise Exception("Zero submission count after inserting submission")
+        elif gif_submissions == 1:
+            message.reply_text(
+                f"Thanks for the new GIF! You have submitted {user_submissions}/{max_} GIFs.",
             )
-            user_sticker_submissions = cur.fetchone()[0]
-            if user_sticker_submissions > 0:
-                return f"You{apos}ve already submitted this sticker."
-
-            cur.execute(
-                """
-                INSERT INTO "submissions"("user_id", "sticker_id") VALUES (%s, %s)
-                    ON CONFLICT DO NOTHING
-                """,
-                (user.id, sticker.file_unique_id)
+        else:
+            message.reply_text(
+                f"Got it! This GIF has been submitted {gif_submissions} times.",
             )
 
-            update_submission_data(new_transaction=False)
-
-            sticker_submissions = get_sticker_submission_count(cur)
-            if sticker_submissions == 0:
-                return "Oops, something went wrong."
-            elif sticker_submissions == 1:
-                user_submissions = get_user_submission_count(cur)
-                return f"Thanks for the new sticker! You have submitted {user_submissions} stickers."
-            else:
-                return f"Got it! This sticker has been submitted {sticker_submissions} times."
+    if new_transaction:
+        db.commit()
 
 
-def sticker_message(update, context):
+def gif_message(update, context):
     message = update.message
     if message.reply_to_message:
         return
 
-    user = message.from_user
-    upsert_user(user)
-    sticker = message.sticker
-    if sticker.is_animated:
-        message.reply_text(f"I{apos}m not prepared to deal with animated stickers!")
+    gif = message.animation
+    if not gif:
         return
-    upsert_sticker(sticker, user)
-    reply = add_submission(user, sticker)
-    message.reply_text(reply)
+    user = message.from_user
+    with db:
+        try:
+            upsert_user(user)
+            reply = upsert_gif(gif, user)
+            if reply is not None:
+                message.reply_text(reply)
+                return
+            add_submission(message, user, gif)
+        except Exception as e:
+            message.reply_text(
+                "Welp! Something went wrong when trying to process your submission."
+            )
+            logging.exception(e)
 
 
-sticker_chat_filter = Filters.chat()
-sticker_handler = MessageHandler(
-    callback=sticker_message,
-    filters=Filters.sticker & sticker_chat_filter,
+gif_chat_filter = Filters.chat()
+gif_handler = MessageHandler(
+    callback=gif_message,
+    filters=Filters.animation & gif_chat_filter,
 )
-dispatcher.add_handler(sticker_handler)
+dispatcher.add_handler(gif_handler)
 
 
 def send_bracket(chat_id, caption=None, parse_mode=None):
@@ -326,7 +357,7 @@ def send_bracket(chat_id, caption=None, parse_mode=None):
         update_bracket_image()
 
     if caption is None:
-        caption = r"High resolution version available at [stickerdome\.dipo\.rocks](https://stickerdome.dipo.rocks/)"
+        caption = r"High resolution version available at [gifdome\.dipo\.rocks](https://gifdome.dipo.rocks/)"
     if parse_mode is None:
         parse_mode = PARSEMODE_MARKDOWN_V2
 
@@ -363,7 +394,7 @@ def bracket_command(update, context):
         )
         return
 
-    current_match_index = _int_from_bytes(redis.get("current_match"))
+    current_match_index = redis_get_int("current_match")
     if (
         current_match_index is None
         or (state == State.VOTING.value and current_match_index < 128)
@@ -384,11 +415,14 @@ bracket_handler = CommandHandler(
     command="bracket",
     callback=bracket_command,
 )
-dispatcher.add_handler(bracket_handler)
+# TODO
+# dispatcher.add_handler(bracket_handler)
 
 
 def update_bracket_image():
-    current_match_index = _int_from_bytes(redis.get("current_match"))
+    return  # TODO
+
+    current_match_index = redis_get_int("current_match")
     if redis.get("matches") is None or current_match_index < 128:
         return
 
@@ -423,23 +457,24 @@ def update_bracket_image():
 
 
 def help_command(update, context):
-    text = fr"Modeled after [XKCD{apos}s Emojidome](https://www.explainxkcd.com/wiki/index.php/2131:_Emojidome), Stickerdome aims to find the ultimate sticker by process of elimination\."
+    lines = [
+        fr"Modeled after [XKCD{apos}s Emojidome](https://www.explainxkcd.com/wiki/index.php/2131:_Emojidome), GIFdome aims to find the ultimate GIF by process of elimination\.",
+    ]
 
     state = redis.get("state")
     if state == State.TAKING_SUBMISSIONS.value:
-        text += "\n\nCurrently in submission phase\\. The most submitted stickers advance to the voting phase\\."
+        lines.append(r"Currently in submission phase\. The most submitted GIFs advance to the voting phase\.")
     elif state == State.VOTING.value:
-        text += "\n\nCurrently in voting phase\\. See the pinned message for the latest poll\\."
+        lines.append(r"Currently in voting phase\. See the pinned message for the latest poll\.")
     elif state == State.ENDED.value:
-        text += "\n\nThis Stickerdome has ended\\."
+        lines.append(r"This GIFdome has ended\.")
 
-    with open(project_path / "stickerdome.png", "rb") as img:
-        context.bot.send_photo(
-            chat_id=update.effective_chat.id,
-            photo=img,
-            parse_mode=PARSEMODE_MARKDOWN_V2,
-            caption=text,
-        )
+    context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        parse_mode=PARSEMODE_MARKDOWN_V2,
+        text="\n\n".join(lines),
+        disable_web_page_preview=True,
+    )
 
 
 help_handler = CommandHandler(command="help", callback=help_command)
@@ -494,7 +529,7 @@ def voting_command(update, context):
     if redis.get("state") != State.TAKING_SUBMISSIONS.value:
         context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="The Stickerdome must be in submission phase to start voting.",
+            text="The GIFdome must be in submission phase to start voting.",
         )
         return
 
@@ -512,7 +547,7 @@ def voting_command(update, context):
         )
         return
 
-    sticker_chat_filter.remove_chat_ids(update.effective_chat.id)
+    gif_chat_filter.remove_chat_ids(update.effective_chat.id)
     redis.set("state", State.VOTING.value)
     context.bot.send_message(chat_id=update.effective_chat.id, text=f"Submissions closed, it{apos}s voting time!")
     next_match()
@@ -526,32 +561,6 @@ voting_handler = CommandHandler(
 dispatcher.add_handler(voting_handler)
 
 
-def markdown_escape(text):
-    return re.sub(r"[\\_*\[\]()~`>#+\-=|{}.!]", r"\\\g<0>", text)
-
-
-def sticker_sets_command(update, context):
-    lines = []
-    with db:
-        with db.cursor() as cur:
-            cur.execute('SELECT "id", "title" FROM "sticker_sets"')
-            for id_, title in cur:
-                lines.append(f"[{markdown_escape(title)}](https://t.me/addstickers/{id_})")
-    context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="\n".join(lines),
-        parse_mode=PARSEMODE_MARKDOWN_V2,
-    )
-
-
-sticker_sets_handler = CommandHandler(
-    command="stickersets",
-    callback=sticker_sets_command,
-    filters=Filters.user(username=config["admins"]),
-)
-dispatcher.add_handler(sticker_sets_handler)
-
-
 def generate_versus_image(file_id_a, file_id_b, out):
     with Image.open(project_path / "stickers" / f"{file_id_a}.webp") as img_a, Image.open(project_path / "stickers" / f"{file_id_b}.webp") as img_b:
         img = Image.open(project_path / "versus-template.png")
@@ -560,29 +569,8 @@ def generate_versus_image(file_id_a, file_id_b, out):
         img.save(out, format="PNG")
 
 
-def _duration(sec):
-    hours = sec // 3600
-    minutes = (sec - hours * 3600) // 60
-    seconds = sec - hours * 3600 - minutes * 60
-    parts = []
-    if hours:
-        parts.append(f"{hours} hour")
-    if hours > 1:
-        parts[-1] += "s"
-    if minutes:
-        parts.append(f"{minutes} minute")
-    if minutes > 1:
-        parts[-1] += "s"
-    if seconds:
-        parts.append(f"{seconds} second")
-    if seconds > 1:
-        parts[-1] += "s"
-    return " ".join(parts)
-
-
 def new_poll(sticker_ids, match_duration):
-    group_id = _int_from_bytes(redis.get("group_id"))
-    if group_id is None:
+    if (group_id := redis_get_int("group_id")) is None:
         raise ValueError("Missing or invalid group_id")
 
     file_ids = []
@@ -621,7 +609,12 @@ def new_poll(sticker_ids, match_duration):
 
     with io.BytesIO() as img:
         generate_versus_image(*file_ids, img)
-        stickers_message = bot.send_photo(chat_id=group_id, photo=img.getvalue(), caption=caption, parse_mode=PARSEMODE_MARKDOWN_V2)
+        stickers_message = bot.send_photo(
+            chat_id=group_id,
+            photo=img.getvalue(),
+            caption=caption,
+            parse_mode=PARSEMODE_MARKDOWN_V2,
+        )
     poll_message = bot.send_poll(
         chat_id=group_id,
         question="Which shall win?",
@@ -637,8 +630,7 @@ def new_poll(sticker_ids, match_duration):
 
 
 def current_match():
-    index = _int_from_bytes(redis.get("current_match"))
-    if index is None:
+    if (index := redis_get_int("current_match")) is None:
         return None
     try:
         matches = json.loads(redis.get("matches"))
@@ -651,7 +643,7 @@ def current_match():
 
 
 def next_match():
-    current_match_index = _int_from_bytes(redis.get("current_match"))
+    current_match_index = redis_get_int("current_match")
     print("called next_match; current_match_index is", current_match_index)
 
     if current_match_index is None:
@@ -682,9 +674,8 @@ def next_match():
         next_match()
         return
 
-    current_poll_message_id = _int_from_bytes(redis.get("current_poll_message"))
-
-    group_id = _int_from_bytes(redis.get("group_id"))
+    current_poll_message_id = redis_get_int("current_poll_message")
+    group_id = redis_get_int("group_id")
 
     old_poll = None
     if current_poll_message_id is not None:
@@ -728,7 +719,7 @@ def next_match():
 
     if end:
         redis.set("state", State.ENDED.value)
-        update_match_data()
+        update_chat_description()
         send_bracket(
             chat_id=group_id,
             caption=r"Ohi on\! kiitos pelaamisesta vaikka äänestitte VÄÄRIN",
@@ -740,7 +731,7 @@ def next_match():
         new_participants = match_participants(new_match_index, matches)
         new_poll(new_participants, new_match["duration"])
         redis.set("current_match", new_match_index)
-        update_match_data()
+        update_chat_description()
 
 
 def poll_update(update, context):
@@ -767,7 +758,7 @@ def poll_update(update, context):
         print("it's a tie")
         return
 
-    poll_start = _int_from_bytes(redis.get("current_poll_start"))
+    poll_start = redis_get_int("current_poll_start")
     if poll_start is None:
         return
 
@@ -793,15 +784,15 @@ def next_command(update, context):
     if match is None:
         return
 
-    poll_start = _int_from_bytes(redis.get("current_poll_start"))
+    poll_start = redis_get_int("current_poll_start")
 
-    match_index = _int_from_bytes(redis.get("current_match"))
+    match_index = redis_get_int("current_match")
     if match_index is not None and match_index >= 248:
         if update.effective_user.username not in config["admins"]:
             texts = ["Only admins can use /next at this stage."]
             if poll_start is not None and _now() - poll_start < match["duration"]:
                     poll_end = poll_start + match["duration"]
-                    texts.append(f"This poll can be closed in {_duration(poll_end - _now())}.")
+                    texts.append(f"This poll can be closed in {duration(poll_end - _now())}.")
             context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=" ".join(texts),
@@ -813,11 +804,11 @@ def next_command(update, context):
             poll_end = poll_start + match["duration"]
             context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text=f"This poll can be closed in {_duration(poll_end - _now())}."
+                text=f"This poll can be closed in {duration(poll_end - _now())}."
             )
             return
 
-    voter_count = _int_from_bytes(redis.get("current_voter_count"))
+    voter_count = redis_get_int("current_voter_count")
     if voter_count is not None and voter_count < config["min_votes"]:
         context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -855,19 +846,18 @@ def start_command(update, context):
     if redis.get("state") != State.NOT_STARTED.value:
         context.bot.send_message(
             chat_id=chat_id,
-            text="The Stickerdome has already begun!"
+            text="The GIFdome has already begun!"
         )
         return
     redis.set("state", State.TAKING_SUBMISSIONS.value)
     redis.set("group_id", chat_id)
-    sticker_chat_filter.add_chat_ids(chat_id)
-    dispatcher.add_handler(sticker_handler)
-    with open(project_path / "stickerdome.png", "rb") as img:
-        welcome = context.bot.send_photo(
-            chat_id=chat_id,
-            photo=img,
-            caption="The Stickerdome has started! Send your me dankest stickers!",
-        )
+    gif_chat_filter.add_chat_ids(chat_id)
+    dispatcher.add_handler(gif_handler)
+
+    welcome = context.bot.send_message(
+        chat_id=chat_id,
+        text="The GIFdome has started! Send your me dankest GIFs!",
+    )
     context.bot.pin_chat_message(
         chat_id=chat_id,
         message_id=welcome.message_id,
@@ -881,7 +871,7 @@ dispatcher.add_handler(start_handler)
 
 def stop_command(update, context):
     reset()
-    context.bot.send_message(chat_id=update.effective_chat.id, text="The Stickerdome has been reset.")
+    context.bot.send_message(chat_id=update.effective_chat.id, text="The GIFdome has been reset.")
 
 
 stop_handler = CommandHandler(
@@ -893,17 +883,16 @@ dispatcher.add_handler(stop_handler)
 
 
 state = redis.get("state")
-group_id_bytes = redis.get("group_id")
-group_id = _int_from_bytes(group_id_bytes)
+group_id = redis_get_int("group_id")
 
-if state not in _enum_values(State):
+if state not in enum_values(State):
     if state == b'reset':
         reset()
     else:
         raise ValueError("Invalid state in Redis")
 
 if state == State.NOT_STARTED.value:
-    if group_id_bytes is not None:
+    if redis.get("group_id") is not None:
         raise ValueError("group_id should not exist in Redis")
 
 if state in [State.TAKING_SUBMISSIONS.value, State.VOTING.value, State.ENDED.value]:
@@ -922,7 +911,7 @@ if state == State.TAKING_SUBMISSIONS.value:
     ]:
         if redis.get(key) is not None:
             raise ValueError(f"{key} should not exist in Redis")
-    sticker_chat_filter.add_chat_ids(group_id)
+    gif_chat_filter.add_chat_ids(group_id)
 
 if state == State.VOTING.value:
     for key in [
@@ -932,7 +921,7 @@ if state == State.VOTING.value:
         #"current_poll",
         #"current_poll_start",
     ]:
-        if _int_from_bytes(redis.get(key)) is None:
+        if redis_get_int(key) is None:
             raise ValueError(f"Missing or invalid {key} in Redis")
     for key in [
         "matches",
@@ -942,13 +931,10 @@ if state == State.VOTING.value:
             raise ValueError(f"Missing {key} in Redis")
 
 update_bracket_image()
-update_match_data()
+update_chat_description()
 
-if (
-    config["downtime_notifications"]
-    and (group_id := _int_from_bytes(redis.get("group_id"))) is not None
-):
-    bot.send_message(chat_id=group_id, text="The Stickerdome is back up! Sorry for the downtime.")
+if config["downtime_notifications"] and group_id is not None:
+    bot.send_message(chat_id=group_id, text="The GIFdome is back up! Sorry for the downtime.")
 
 updater.start_webhook(
     listen="127.0.0.1",

@@ -10,57 +10,40 @@ api_v1 = Blueprint("api_v1", __name__)
 
 @api_v1.get("/matches.json")
 def matches():
-    seeding = json.loads(redis.get("seeding"))
-    matches = json.loads(redis.get("matches"))
-
-    data = []
-    for i, match in enumerate(matches):
-        if i < 128:
-            match["participants"] = seeding[2 * i : 2 * i + 2]
-        else:
-            match["participants"] = [m["winner"] for m in matches if m["next"] == i]
-    return jsonify(matches)
+    return jsonify(json.loads(redis.get("matches")))
 
 
-@api_v1.get("/stickers.json")
-def stickers():
+@api_v1.get("/gifs.json")
+def gifs():
     with db:
         with db.cursor() as cur:
             cur.execute(
                 """
-                SELECT
-                    "stickers"."id",
-                    "stickers"."file_id",
-                    "stickers"."width",
-                    "stickers"."height",
-                    "sticker_sets"."id",
-                    "sticker_sets"."title"
-                FROM "stickers"
-                    LEFT JOIN "sticker_sets" ON "stickers"."set" = "sticker_sets"."id"
+                SELECT "id", "file_id", "file_size", "mime_type", "width", "height", "duration"
+                FROM "gifs"
                 """)
             data = {}
-            for id_, file_id, width, height, set_id, set_title in cur:
-                sticker = {
+            for id_, file_id, file_size, mime_type, width, height, duration in cur:
+                data[id_] = {
                     "id": id_,
                     "file": file_id,
+                    "filenames": [],
+                    "mime_type": mime_type,
                     "width": width,
                     "height": height,
+                    "duration": duration,
                 }
-                if set_id is not None:
-                    sticker["set"] = {
-                        "id": set_id,
-                        "title": set_title,
-                    }
-                data[id_] = sticker
+            cur.execute('SELECT "gif_id", "filename" FROM "gif_filenames"')
+            for gif_id, filename in cur:
+                data[gif_id]["filenames"].append(filename)
             return data
 
 
 @api_v1.get("/submissions.json")
 def submissions():
-    data = {}
     with db:
         with db.cursor() as cur:
             cur.execute(
-                'SELECT "sticker_id", count(*) FROM "submissions" GROUP BY "sticker_id"'
+                'SELECT "gif_id", count(*) FROM "submissions" GROUP BY "gif_id"'
             )
             return {id_: count for id_, count in cur}

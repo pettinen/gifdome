@@ -1,1 +1,1 @@
-DROP TABLE stickers, submissions, users;
+DROP TABLE gifs, gif_filenames, submissions, users;

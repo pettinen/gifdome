@@ -13,4 +13,4 @@ def create_app(*args):
 
 
 db = psycopg2.connect()
-redis = Redis(unix_socket_path="/run/redis/redis.sock", db=15)
+redis = Redis(unix_socket_path="/run/redis/redis.sock", db=12)
