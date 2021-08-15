@@ -10,7 +10,10 @@ api_v1 = Blueprint("api_v1", __name__)
 
 @api_v1.get("/matches.json")
 def matches():
-    return jsonify(json.loads(redis.get("matches")))
+    raw = redis.get("matches")
+    if raw is None:
+        return jsonify([])
+    return jsonify(json.loads(raw))
 
 
 @api_v1.get("/gifs.json")
