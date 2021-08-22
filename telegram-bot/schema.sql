@@ -14,6 +14,11 @@ CREATE TABLE IF NOT EXISTS "gifs" (
   "submitter" integer REFERENCES "users"("id")
 );
 
+CREATE TABLE IF NOT EXISTS "duplicates" (
+  "duplicate_id" text PRIMARY KEY REFERENCES "gifs"("id"),
+  "primary_id" text REFERENCES "gifs"("id") NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS "gif_filenames" (
   "gif_id" text REFERENCES "gifs"("id"),
   "filename" text,

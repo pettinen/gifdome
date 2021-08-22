@@ -272,10 +272,10 @@ def add_submission(message, user, gif, *, new_transaction=False):
             raise Exception(f"Got {cur.rowcount} rows from counting user submissions")
         return cur.fetchone()[0]
 
-    def get_gif_submission_count(cur):
+    def get_gif_submission_count(cur, gif_id):
         cur.execute(
             'SELECT count(*) FROM "submissions" WHERE "gif_id" = %s',
-            (gif.file_unique_id,),
+            (gif_id,),
         )
         if cur.rowcount != 1:
             raise Exception(f"Got {cur.rowcount} rows from counting GIF submissions")
@@ -285,25 +285,35 @@ def add_submission(message, user, gif, *, new_transaction=False):
         user_submissions = get_user_submission_count(cur)
         max_ = config["max_submissions"]
 
+        gif_id = gif.file_unique_id
+        cur.execute(
+            'SELECT "primary_id" FROM "duplicates" WHERE "duplicate_id" = %s',
+            (gif_id,),
+        )
+        if cur.rowcount > 1:
+            raise Exception(f"Got {cur.rowcount} primary IDs for duplicate ID {gif.file_unique_id}")
+        if cur.rowcount == 1:
+            gif_id, = cur.fetchone()
+
         cur.execute(
             'SELECT count(*) FROM "submissions" WHERE "user_id" = %s AND "gif_id" = %s',
-            (user.id, gif.file_unique_id),
+            (user.id, gif_id),
         )
         if cur.rowcount != 1:
             raise Exception(f"Got {cur.rowcount} rows from counting user's GIF submissions")
-        user_gif_submissions = cur.fetchone()[0]
+        user_gif_submissions, = cur.fetchone()
         if user_gif_submissions != 0:
             message.reply_text(f"You{apos}ve already submitted this GIF.")
             return
 
         cur.execute(
             'INSERT INTO "submissions"("user_id", "gif_id", "created") VALUES (%s, %s, %s)',
-            (user.id, gif.file_unique_id, datetime.now(timezone.utc)),
+            (user.id, gif_id, datetime.now(timezone.utc)),
         )
         if cur.rowcount != 1:
             raise Exception(f"{cur.rowcount} rows inserted into submissions")
 
-        gif_submissions = get_gif_submission_count(cur)
+        gif_submissions = get_gif_submission_count(cur, gif_id)
         user_submissions = get_user_submission_count(cur)
         if gif_submissions == 0:
             raise Exception("Zero submission count after inserting submission")
