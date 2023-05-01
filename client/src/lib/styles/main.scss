@@ -1,0 +1,8 @@
+@use "$lib/styles/globals.scss" as g;
+
+body {
+    padding: 1rem;
+    background-color: g.$background-color;
+    font-family: "Fira Sans", sans-serif;
+    color: g.$text-color;
+}

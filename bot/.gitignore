@@ -1,0 +1,6 @@
+/target/
+*.ffindex
+config.toml
+config.*.toml
+!config.example.toml
+fingerprints.db
